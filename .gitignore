@@ -1,0 +1,41 @@
+# ==========================================
+# 1. Terraform Ignore (Cegah Bocor Kredensial & State)
+# ==========================================
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# ==========================================
+# 2. Python & Virtual Environment Ignore
+# ==========================================
+.venv/
+venv/
+ENV/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.parquet
+*.json
+.env
+
+# ==========================================
+# 3. PyCharm / JetBrains IDE Ignore
+# ==========================================
+.idea/
+*.iml
+.vscode/
+
+# ==========================================
+# 4. OS Specific Files
+# ==========================================
+Thumbs.db
+.DS_Store
