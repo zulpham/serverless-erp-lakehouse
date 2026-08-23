@@ -1,5 +1,5 @@
 # ==========================================
-# 1. Terraform Ignore (Cegah Bocor Kredensial & State)
+# 1. Terraform Ignore
 # ==========================================
 **/.terraform/*
 *.tfstate
@@ -39,3 +39,6 @@ __pycache__/
 # ==========================================
 Thumbs.db
 .DS_Store
+*.zip
+polars_layer_payload.zip
+lambda_function_payload.zip

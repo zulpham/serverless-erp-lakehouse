@@ -9,6 +9,7 @@ import requests
 
 from datetime import datetime, timezone
 from requests.adapters import HTTPAdapter
+from urllib.parse import urljoin
 from urllib3.util.retry import Retry
 
 # Configure Logging
@@ -89,7 +90,8 @@ def fetch_odata_records(
         )
 
         # Retrieve pagination links if the server divides the data into multiple pages
-        url = data.get("@odata.nextLink")
+        next_link = data.get("@odata.nextLink")
+        url = urljoin(url, next_link) if next_link else None
 
     total_duration_ms = round((time.time() - start_fetch_time) * 1000, 2)
     logger.info(
@@ -119,10 +121,35 @@ def transform_and_flatten_orders(orders_raw: list) -> pl.DataFrame:
         )
         return pl.DataFrame()
 
-    df = pl.DataFrame(orders_raw)
+    df = pl.DataFrame(orders_raw, strict=False)
 
-    # Explode the nested array Order_Details then unnest its fields into flat table columns
-    df_flattened = df.explode("Order_Details").unnest("Order_Details")
+    # Explode Order_Details nested array
+    df_exploded = df.explode("Order_Details")
+
+    # Explicitly extract the required fields & remove the Order_Details struct column
+    df_flattened = df_exploded.with_columns(
+        [
+            pl.col("Order_Details")
+            .struct.field("ProductID")
+            .cast(pl.Int64)
+            .alias("ProductID"),
+            pl.col("Order_Details")
+            .struct.field("UnitPrice")
+            .cast(pl.Float64)
+            .fill_null(0.0)
+            .alias("UnitPrice"),
+            pl.col("Order_Details")
+            .struct.field("Quantity")
+            .cast(pl.Int64)
+            .fill_null(0)
+            .alias("Quantity"),
+            pl.col("Order_Details")
+            .struct.field("Discount")
+            .cast(pl.Float64)
+            .fill_null(0.0)
+            .alias("Discount"),
+        ]
+    ).drop("Order_Details")
 
     # Add NetAmount and IngestionTimestamp calculations for data auditing
     df_final = df_flattened.with_columns(
@@ -130,7 +157,7 @@ def transform_and_flatten_orders(orders_raw: list) -> pl.DataFrame:
             (
                     pl.col("UnitPrice").fill_null(0.0)
                     * pl.col("Quantity").fill_null(0)
-                    * (1.0 - pl.col("Discount").fill_null(0.0))
+                    * (1.0 - pl.col("Discount"))
             )
             .cast(pl.Float64)
             .alias("NetAmount"),
@@ -153,7 +180,7 @@ def transform_flat_entity(raw_records: list, entity_name: str) -> pl.DataFrame:
         )
         return pl.DataFrame()
 
-    df = pl.DataFrame(raw_records)
+    df = pl.DataFrame(raw_records, strict=False)
     return df.with_columns(
         pl.lit(datetime.now(timezone.utc).isoformat()).alias("IngestionTimestamp")
     )
