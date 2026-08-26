@@ -65,6 +65,7 @@ resource "aws_iam_role" "github_actions_oidc_role" {
 # 3. Scoped Least-Privilege Deployment Policy
 # ------------------------------------------------------------------------------
 # Explicitly limits the CI/CD runner to resources bearing the project prefix
+# Gantikan resource "aws_iam_policy" "github_oidc_scoped_policy" di terraform/oidc.tf dengan ini:
 resource "aws_iam_policy" "github_oidc_scoped_policy" {
   name        = "${var.project_name}-github-oidc-deploy-policy"
   description = "Scoped policy limiting CI/CD runner to project-specific infrastructure and bootstrap backend"
@@ -92,11 +93,11 @@ resource "aws_iam_policy" "github_oidc_scoped_policy" {
           "arn:aws:lambda:${var.aws_region}:${data.aws_caller_identity.current.account_id}:layer:${var.project_name}-*"
         ]
       },
-      # Project Step Functions State Machines
+      # Project Step Functions State Machines & Validation (Wildcard Resource Required for ASL Validation)
       {
         Effect   = "Allow"
         Action   = ["states:*"]
-        Resource = "arn:aws:states:${var.aws_region}:${data.aws_caller_identity.current.account_id}:stateMachine:${var.project_name}-*"
+        Resource = "*"
       },
       # AWS Glue Catalog & Database
       {
