@@ -2,7 +2,6 @@
 -- 1. APACHE ICEBERG SILVER/GOLD PRODUCTION TABLES (ACID WAREHOUSE)
 -- =============================================================================
 
--- Dim Customers Table
 CREATE TABLE IF NOT EXISTS {DATABASE_NAME}.dim_customers
 (
     customer_id
@@ -41,7 +40,6 @@ CREATE TABLE IF NOT EXISTS {DATABASE_NAME}.dim_customers
     'zstd'
 );
 
--- Dim Products Table
 CREATE TABLE IF NOT EXISTS {DATABASE_NAME}.dim_products
 (
     product_id
@@ -78,7 +76,6 @@ CREATE TABLE IF NOT EXISTS {DATABASE_NAME}.dim_products
     'zstd'
 );
 
--- Dim Employees Table
 CREATE TABLE IF NOT EXISTS {DATABASE_NAME}.dim_employees
 (
     employee_id
@@ -127,7 +124,6 @@ CREATE TABLE IF NOT EXISTS {DATABASE_NAME}.dim_employees
     'zstd'
 );
 
--- Dim Suppliers Table
 CREATE TABLE IF NOT EXISTS {DATABASE_NAME}.dim_suppliers
 (
     supplier_id
@@ -168,7 +164,6 @@ CREATE TABLE IF NOT EXISTS {DATABASE_NAME}.dim_suppliers
     'zstd'
 );
 
--- Fact Order Details Table (Partitioned by year(order_date))
 CREATE TABLE IF NOT EXISTS {DATABASE_NAME}.fact_order_details
 (
     order_id
@@ -246,7 +241,7 @@ EXTERNAL TABLE IF NOT EXISTS {DATABASE_NAME}.stg_raw_customers (
     Country string,
     Phone string,
     Fax string,
-    _ingestion_timestamp string
+    `_ingestion_timestamp` string
 )
 PARTITIONED BY (year string, month string)
 STORED AS PARQUET
@@ -273,7 +268,7 @@ EXTERNAL TABLE IF NOT EXISTS {DATABASE_NAME}.stg_raw_products (
     UnitsOnOrder int,
     ReorderLevel int,
     Discontinued boolean,
-    _ingestion_timestamp string
+    `_ingestion_timestamp` string
 )
 PARTITIONED BY (year string, month string)
 STORED AS PARQUET
@@ -306,7 +301,7 @@ EXTERNAL TABLE IF NOT EXISTS {DATABASE_NAME}.stg_raw_employees (
     Extension string,
     Notes string,
     ReportsTo int,
-    _ingestion_timestamp string
+    `_ingestion_timestamp` string
 )
 PARTITIONED BY (year string, month string)
 STORED AS PARQUET
@@ -335,7 +330,7 @@ EXTERNAL TABLE IF NOT EXISTS {DATABASE_NAME}.stg_raw_suppliers (
     Phone string,
     Fax string,
     HomePage string,
-    _ingestion_timestamp string
+    `_ingestion_timestamp` string
 )
 PARTITIONED BY (year string, month string)
 STORED AS PARQUET
@@ -370,7 +365,7 @@ EXTERNAL TABLE IF NOT EXISTS {DATABASE_NAME}.stg_raw_orders (
     UnitPrice double,
     Quantity bigint,
     Discount double,
-    _ingestion_timestamp string
+    `_ingestion_timestamp` string
 )
 PARTITIONED BY (year string, month string)
 STORED AS PARQUET
