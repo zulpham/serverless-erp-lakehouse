@@ -62,7 +62,7 @@ resource "aws_iam_role" "github_actions_oidc_role" {
 }
 
 # ------------------------------------------------------------------------------
-# 3. Scoped Least-Privilege Deployment Policy (Closing the God Mode Trap)
+# 3. Scoped Least-Privilege Deployment Policy
 # ------------------------------------------------------------------------------
 # Explicitly limits the CI/CD runner to resources bearing the project prefix
 resource "aws_iam_policy" "github_oidc_scoped_policy" {
@@ -85,8 +85,8 @@ resource "aws_iam_policy" "github_oidc_scoped_policy" {
       },
       # Project Lambda Functions & Lambda Layers
       {
-        Effect   = "Allow"
-        Action   = ["lambda:*"]
+        Effect = "Allow"
+        Action = ["lambda:*"]
         Resource = [
           "arn:aws:lambda:${var.aws_region}:${data.aws_caller_identity.current.account_id}:function:${var.project_name}-*",
           "arn:aws:lambda:${var.aws_region}:${data.aws_caller_identity.current.account_id}:layer:${var.project_name}-*"
@@ -106,8 +106,8 @@ resource "aws_iam_policy" "github_oidc_scoped_policy" {
       },
       # Scoped IAM Roles, Policies, & OIDC Provider
       {
-        Effect   = "Allow"
-        Action   = ["iam:*"]
+        Effect = "Allow"
+        Action = ["iam:*"]
         Resource = [
           "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${var.project_name}-*",
           "arn:aws:iam::${data.aws_caller_identity.current.account_id}:policy/${var.project_name}-*",
@@ -116,8 +116,8 @@ resource "aws_iam_policy" "github_oidc_scoped_policy" {
       },
       # DynamoDB State Lock Tables
       {
-        Effect   = "Allow"
-        Action   = ["dynamodb:*"]
+        Effect = "Allow"
+        Action = ["dynamodb:*"]
         Resource = [
           "arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/${var.project_name}-*",
           "arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/erp-lakehouse-portfolio-*"
