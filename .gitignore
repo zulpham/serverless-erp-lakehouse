@@ -42,3 +42,4 @@ Thumbs.db
 *.zip
 polars_layer_payload.zip
 lambda_function_payload.zip
+layers/
