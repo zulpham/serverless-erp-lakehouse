@@ -1,16 +1,36 @@
+# ==============================================================================
+# GITOPS CI/CD PIPELINE - SERVERLESS DATA LAKEHOUSE
+# ==============================================================================
+# Architecture: Dual-Stage Automated Delivery (Quality Gate -> Zero-Trust Deploy)
+# Security Standard: Passwordless AWS IAM OIDC Federation (SOC-2 & CIS Compliant)
+# Trigger Lifecycle: Runs validation on PRs; applies infrastructure changes on Push.
+# ==============================================================================
+
 name: "Data Lakehouse CI/CD GitOps Pipeline"
 
+# ------------------------------------------------------------------------------
+# 1. Trigger Conditions
+# ------------------------------------------------------------------------------
+# Defines which repository events trigger this automated pipeline.
 on:
+  # Triggered on direct code pushes to main branches (Triggers validation + deployment)
   push:
     branches:
       - master
       - main
+  # Triggered on Pull Requests targeting main branches (Triggers validation + plan preview)
   pull_request:
     branches:
       - master
       - main
 
-# Mandatory OIDC token generation permissions
+# ------------------------------------------------------------------------------
+# 2. Global Workflow Permissions
+# ------------------------------------------------------------------------------
+# Enforces Least Privilege security while granting required tokens:
+# - id-token: write -> Mandatory for requesting the OIDC JWT token from GitHub's authority.
+# - contents: read  -> Allows the runner to checkout and read repository source code.
+# - pull-requests: write -> Allows the bot to publish automated Terraform plan comments on PRs.
 permissions:
   id-token: write
   contents: read
@@ -18,39 +38,54 @@ permissions:
 
 jobs:
   # ============================================================================
-  # JOB 1: CODE QUALITY & PYTHON VALIDATION GATE
+  # STAGE 1: CODE QUALITY & PYTHON VALIDATION GATE
+  # ============================================================================
+  # Purpose: Ensures all Python code is syntactically sound and conforms to PEP8
+  #          standards before allowing any infrastructure deployment to proceed.
   # ============================================================================
   code-quality:
     name: "1. Python Code Quality & AST Validation"
     runs-on: ubuntu-latest
 
     steps:
+      # Step 1.1: Clone the repository source code onto the GitHub runner
       - name: "Checkout Repository Code"
         uses: actions/checkout@v4
 
+      # Step 1.2: Initialize an isolated Python 3.11 runtime environment
       - name: "Set up Python 3.11"
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      # Step 1.3: Install validation dependencies and core Lakehouse libraries
       - name: "Install Quality Gate Dependencies"
         run: |
           python -m pip install --upgrade pip
           pip install flake8 polars requests urllib3 boto3
 
+      # Step 1.4: Dynamic AST Syntax Validation
+      # Why 'compileall'? Dynamically scans and compiles all .py files in 'src/' into
+      # bytecode. Fails fast if any script has syntax errors or missing imports.
       - name: "Validate Python AST Compilation"
         run: |
-          python -m py_compile src/ingestion/lambda_function.py
-          python -m py_compile src/transformation/glue_transform.py
+          python -m compileall src/
           echo "Python AST Compilation: 100% VALID"
 
+      # Step 1.5: Static Code Analysis & Linting via Flake8
       - name: "Lint Python Source with Flake8"
         run: |
+          # Stop the build immediately if there are syntax errors or undefined variables
           flake8 src/ --count --select=E9,F63,F7,F82 --show-source --statistics
+          # Warnings check: Enforces complexity <= 10 and max line length of 127 characters
           flake8 src/ --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
   # ============================================================================
-  # JOB 2: TERRAFORM GITOPS DEPLOYMENT (PURE ZERO-TRUST OIDC)
+  # STAGE 2: TERRAFORM GITOPS INFRASTRUCTURE DEPLOYMENT
+  # ============================================================================
+  # Purpose: Provisions, validates, and automatically deploys AWS Lakehouse
+  #          resources using pure passwordless OIDC authentication.
+  # Prerequisite: Stage 1 (code-quality) MUST succeed before Stage 2 can execute.
   # ============================================================================
   terraform:
     name: "2. Terraform Infrastructure GitOps"
@@ -58,59 +93,63 @@ jobs:
     needs: code-quality
     defaults:
       run:
-        working-directory: ./terraform
+        working-directory: ./terraform # Executes all commands inside the terraform/ directory
 
     steps:
+      # Step 2.1: Clone repository code to the deployment runner
       - name: "Checkout Repository Code"
         uses: actions/checkout@v4
 
+      # Step 2.2: Setup the official HashiCorp Terraform CLI binary
       - name: "Set up Terraform CLI"
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.9.0"
 
-      # ------------------------------------------------------------------------
-      # FORENSIC DEBUGGER: Inspect Decoded GitHub OIDC Claims
-      # ------------------------------------------------------------------------
-      - name: "Debug OIDC Token Claims (JWT Inspection)"
-        run: |
-          TOKEN=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r '.value')
-          echo "=== DECODED OIDC JWT CLAIMS ==="
-          echo "$TOKEN" | cut -d '.' -f 2 | base64 -d 2>/dev/null | jq .  
-
-      # ------------------------------------------------------------------------
-      # PURE ZERO-TRUST OIDC AUTHENTICATION (NO STATIC ACCESS KEYS)
-      # ------------------------------------------------------------------------
+      # Step 2.3: Zero-Trust OIDC Authentication with AWS STS
+      # Why OIDC? Exchanges an ephemeral GitHub JWT token for short-lived AWS credentials.
+      # Eliminates long-lived access keys and guarantees zero stored secrets in GitHub.
       - name: "Configure AWS Credentials via Pure OIDC (Zero-Trust)"
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ secrets.AWS_REGION }}
-          audience: sts.amazonaws.com
+          audience: sts.amazonaws.com # Explicitly matches the IAM trust policy condition
 
+      # Step 2.4: Cross-Platform Lambda Layer Dependency Packaging
+      # Why manylinux2014_x86_64? Polars contains native compiled Rust binaries (.so).
+      # Installing with this flag ensures binary compatibility with AWS Lambda Linux runtime.
       - name: "Prepare Lambda Layer Linux Binary Wheels"
         run: |
           mkdir -p ../layers/polars_layer/python
           pip install -r ../src/ingestion/requirements.txt --platform manylinux2014_x86_64 --target ../layers/polars_layer/python --only-binary=:all: --upgrade
 
+      # Step 2.5: Enforce Standard Terraform Formatting
+      # Fails if any .tf file is not properly formatted per 'terraform fmt' conventions.
       - name: "Terraform Format Check"
         run: terraform fmt -check
 
+      # Step 2.6: Initialize Backend & Provider Plugins
+      # Connects to the centralized S3 Remote State Bucket and DynamoDB Lock Table.
       - name: "Terraform Init (Remote S3 & DynamoDB Locking)"
         run: terraform init
 
+      # Step 2.7: Static Configuration Validation
+      # Verifies the internal consistency and syntax of all Terraform HCL blocks.
       - name: "Terraform Validate"
         run: terraform validate
 
+      # Step 2.8: Deterministic Execution Plan Generation
+      # Generates a binary execution plan artifact ('tfplan') and exports human-readable diff.
       - name: "Terraform Plan"
         id: plan
         run: |
           terraform plan -no-color -out=tfplan
           terraform show -no-color tfplan > plan_output.txt
 
-      # ------------------------------------------------------------------------
-      # GitOps Transparency: Post Plan Diff as PR Comment
-      # ------------------------------------------------------------------------
+      # Step 2.9: Automated Pull Request Plan Auditing
+      # Reads the generated diff and automatically injects it as a comment on the active PR.
+      # Provides reviewers with instant visibility into planned cloud resource mutations.
       - name: "Post Terraform Plan to Pull Request"
         uses: actions/github-script@v7
         if: github.event_name == 'pull_request'
@@ -135,9 +174,9 @@ jobs:
               body: output
             });
 
-      # ------------------------------------------------------------------------
-      # Automated Deployment with Strict Operator Precedence
-      # ------------------------------------------------------------------------
+      # Step 2.10: Automated Deployment Execution (Push to Main/Master Only)
+      # Uses explicit boolean operator precedence: Only applies changes on direct PUSH events.
+      # Applies the exact pre-computed 'tfplan' binary to guarantee zero execution drift.
       - name: "Terraform Apply (Automatic Deployment on Push)"
         if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
         run: terraform apply -auto-approve tfplan

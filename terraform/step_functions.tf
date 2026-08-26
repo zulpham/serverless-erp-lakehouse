@@ -1,5 +1,5 @@
 # ==============================================================================
-# AWS STEP FUNCTIONS - SERVERLESS INGESTION & DLQ ORCHESTRATOR
+# ORCHESTRATION LAYER - AWS STEP FUNCTIONS STATE MACHINE & DLQ
 # ==============================================================================
 # Architecture: Resilient Distributed State Machine with SNS Dead-Letter Alerting
 # Standards: Injected Initial State, Bounded Concurrency, & Fail-Safe Catching
@@ -11,7 +11,7 @@
 # 1. Amazon SNS Topic for SRE Dead-Letter Alerts (DLQ)
 # ------------------------------------------------------------------------------
 # Dedicated notification channel receiving fatal failure payloads when a task
-# exhausts all retry attempts. Allows on-call engineers to triage issues instantly.
+# exhausts all retry attempts.
 resource "aws_sns_topic" "pipeline_alerts" {
   name = "${var.project_name}-pipeline-alerts"
 
@@ -23,14 +23,13 @@ resource "aws_sns_topic" "pipeline_alerts" {
 # ------------------------------------------------------------------------------
 # 2. CloudWatch Log Group for State Machine Execution Tracing
 # ------------------------------------------------------------------------------
-# Retains detailed execution history and state transition logs for 14 days.
 resource "aws_cloudwatch_log_group" "step_functions_logs" {
   name              = "/aws/vendedlogs/states/${var.project_name}-ingestion-orchestrator"
   retention_in_days = 14
 }
 
 # ------------------------------------------------------------------------------
-# 3. IAM Role & Granular Least-Privilege Policy for Step Functions
+# 3. IAM Execution Role & Granular Policy for Step Functions
 # ------------------------------------------------------------------------------
 resource "aws_iam_role" "step_functions_role" {
   name = "${var.project_name}-step-functions-role"
@@ -56,7 +55,7 @@ resource "aws_iam_policy" "step_functions_policy" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      # Invoke Ingestion Lambda Function
+      # Invoke Ingestion Lambda
       {
         Effect = "Allow"
         Action = [
@@ -67,7 +66,7 @@ resource "aws_iam_policy" "step_functions_policy" {
           "${aws_lambda_function.ingestion_lambda.arn}:*"
         ]
       },
-      # Native AWS SDK SSM Parameter Store Integration (Watermark Mutation)
+      # Native AWS SDK SSM Parameter Store Integration
       {
         Effect = "Allow"
         Action = [
@@ -76,7 +75,7 @@ resource "aws_iam_policy" "step_functions_policy" {
         ]
         Resource = "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/${var.project_name}/*"
       },
-      # Amazon SNS DLQ Notification Publishing
+      # Amazon SNS Notification Publishing
       {
         Effect = "Allow"
         Action = [
@@ -128,7 +127,6 @@ resource "aws_sfn_state_machine" "ingestion_orchestrator" {
       # ------------------------------------------------------------------------
       # STEP 0: INJECT DEFAULT STATE (Anti First-Run JSONPath Missing Crash)
       # ------------------------------------------------------------------------
-      # Guarantees that initial state variables exist even if triggered by an empty {} payload.
       InjectDefaultState = {
         Type = "Pass"
         Result = {
@@ -151,7 +149,6 @@ resource "aws_sfn_state_machine" "ingestion_orchestrator" {
       # ------------------------------------------------------------------------
       # STEP 1: PARALLEL INGESTION (Dimensions Map + Orders Looping Flow)
       # ------------------------------------------------------------------------
-      # Executes independent dimension table extracts concurrently with fact order ingestion.
       ParallelIngestion = {
         Type = "Parallel"
         Next = "ExtractOrdersWatermark"
@@ -159,13 +156,12 @@ resource "aws_sfn_state_machine" "ingestion_orchestrator" {
           # --------------------------------------------------------------------
           # BRANCH 0: DIMENSION ENTITIES MAP STATE (Bounded Concurrency: 4)
           # --------------------------------------------------------------------
-          # Concurrently processes all dimension tables using inline worker pool.
           {
             StartAt = "IngestDimensionsMap"
             States = {
               IngestDimensionsMap = {
                 Type           = "Map"
-                MaxConcurrency = 4 # Token-Bucket Rate Limit Protection
+                MaxConcurrency = 4
                 ItemsPath      = "$.dimensions"
                 End            = true
                 ItemProcessor = {
@@ -181,7 +177,6 @@ resource "aws_sfn_state_machine" "ingestion_orchestrator" {
                         FunctionName = aws_lambda_function.ingestion_lambda.function_name
                         "Payload.$"  = "$"
                       }
-                      # SRE Retry Policy on Transient Infrastructure Exceptions
                       Retry = [
                         {
                           ErrorEquals     = ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"]
@@ -190,7 +185,6 @@ resource "aws_sfn_state_machine" "ingestion_orchestrator" {
                           BackoffRate     = 2.0
                         }
                       ]
-                      # SRE Dead-Letter Alerting on Unrecoverable Failures
                       Catch = [
                         {
                           ErrorEquals = ["States.ALL"]
@@ -201,7 +195,6 @@ resource "aws_sfn_state_machine" "ingestion_orchestrator" {
                       End = true
                     }
 
-                    # Serializes error object into a clean string for Amazon SNS
                     NotifyDimensionFailureSNS = {
                       Type     = "Task"
                       Resource = "arn:aws:states:::sns:publish"
@@ -226,7 +219,6 @@ resource "aws_sfn_state_machine" "ingestion_orchestrator" {
           # --------------------------------------------------------------------
           # BRANCH 1: ORDERS FACT INGESTION FLOW WITH STATEFUL CHOICE LOOP
           # --------------------------------------------------------------------
-          # Handles large transactional fact volumes with graceful pagination loops.
           {
             StartAt = "InvokeOrdersLambda"
             States = {
@@ -272,7 +264,6 @@ resource "aws_sfn_state_machine" "ingestion_orchestrator" {
                 Next = "EvaluateOrdersPartial"
               }
 
-              # Evaluates if Lambda was interrupted due to pagination bounds
               EvaluateOrdersPartial = {
                 Type = "Choice"
                 Choices = [
@@ -285,7 +276,6 @@ resource "aws_sfn_state_machine" "ingestion_orchestrator" {
                 Default = "OrdersIngestionComplete"
               }
 
-              # State Machine Loopback: Feeds resume cursor and next chunk index to Lambda
               PrepareOrdersResumePayload = {
                 Type = "Pass"
                 Parameters = {
@@ -334,8 +324,8 @@ resource "aws_sfn_state_machine" "ingestion_orchestrator" {
       ExtractOrdersWatermark = {
         Type = "Pass"
         Parameters = {
-          "orders_final_watermark.$" = "$[1].final_watermark"
-          "orders_partition_path.$"  = "$[1].partition_path"
+          "orders_final_watermark.$" = "$.final_watermark"
+          "orders_partition_path.$"  = "$.partition_path"
         }
         Next = "CheckIfWatermarkExists"
       }
@@ -355,7 +345,6 @@ resource "aws_sfn_state_machine" "ingestion_orchestrator" {
       # ------------------------------------------------------------------------
       # STEP 3: ATOMIC COMMIT SSM WATERMARK (Native AWS SDK Integration)
       # ------------------------------------------------------------------------
-      # Persists the highest successfully committed Event-Time timestamp to SSM.
       CommitOrdersSSMWatermark = {
         Type     = "Task"
         Resource = "arn:aws:states:::aws-sdk:ssm:putParameter"

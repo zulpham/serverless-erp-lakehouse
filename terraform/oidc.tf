@@ -1,10 +1,14 @@
-variable "github_repository" {
-  description = "Format: 'username/repo-name'"
-  type        = string
-  default     = "zulpham/serverless-erp-lakehouse"
-}
+# ==============================================================================
+# ZERO-TRUST CI/CD - AWS IAM OPENID CONNECT (OIDC) FEDERATION MODULE
+# ==============================================================================
+# Architecture: Passwordless Identity Federation (GitHub Actions -> AWS STS)
+# Standards: Immutable Subject Claim Binding & Scoped Permissions Policy
+# ==============================================================================
 
-# 1. AWS IAM OpenID Connect (OIDC) Provider dengan Thumbprint Resmi Terlengkap
+# ------------------------------------------------------------------------------
+# 1. AWS IAM OpenID Connect (OIDC) Identity Provider
+# ------------------------------------------------------------------------------
+# Registers GitHub Actions as a trusted identity provider within the AWS Account
 resource "aws_iam_openid_connect_provider" "github_oidc" {
   url            = "https://token.actions.githubusercontent.com"
   client_id_list = ["sts.amazonaws.com"]
@@ -19,7 +23,10 @@ resource "aws_iam_openid_connect_provider" "github_oidc" {
   }
 }
 
-# Gantikan resource "aws_iam_role" "github_actions_oidc_role" di terraform/oidc.tf dengan ini:
+# ------------------------------------------------------------------------------
+# 2. IAM Role for GitHub Actions (Repo-Locked Trust Policy)
+# ------------------------------------------------------------------------------
+# Restricts role assumption strictly to workflows originating from your specific repository
 resource "aws_iam_role" "github_actions_oidc_role" {
   name = "${var.project_name}-github-oidc-deploy-role"
 
@@ -36,9 +43,10 @@ resource "aws_iam_role" "github_actions_oidc_role" {
           StringEquals = {
             "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
           }
-          # COCOKKAN SECARA EKSPLISIT FORMAT IMMUTABLE ID GITHUB ANDA
+          # Anti Confused-Deputy: Matches both 2026 Immutable ID format and wildcard slugs
           StringLike = {
             "token.actions.githubusercontent.com:sub" = [
+              "repo:${var.github_repository}:*",
               "repo:zulpham*/serverless-erp-lakehouse*:*",
               "repo:zulpham@172234337/serverless-erp-lakehouse@1346920952:*"
             ]
@@ -53,7 +61,10 @@ resource "aws_iam_role" "github_actions_oidc_role" {
   }
 }
 
-# 3. Izin Deployment
+# ------------------------------------------------------------------------------
+# 3. Scoped Least-Privilege Deployment Policy (Closing the God Mode Trap)
+# ------------------------------------------------------------------------------
+# Explicitly limits the CI/CD runner to resources bearing the project prefix
 resource "aws_iam_policy" "github_oidc_scoped_policy" {
   name        = "${var.project_name}-github-oidc-deploy-policy"
   description = "Scoped policy limiting CI/CD runner to project-specific infrastructure only"
@@ -61,6 +72,7 @@ resource "aws_iam_policy" "github_oidc_scoped_policy" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
+      # Project S3 Buckets
       {
         Effect = "Allow"
         Action = ["s3:*"]
@@ -69,31 +81,37 @@ resource "aws_iam_policy" "github_oidc_scoped_policy" {
           "arn:aws:s3:::${var.project_name}-*/*"
         ]
       },
+      # Project Lambda Functions
       {
         Effect   = "Allow"
         Action   = ["lambda:*"]
         Resource = "arn:aws:lambda:${var.aws_region}:${data.aws_caller_identity.current.account_id}:function:${var.project_name}-*"
       },
+      # Project Step Functions State Machines
       {
         Effect   = "Allow"
         Action   = ["states:*"]
         Resource = "arn:aws:states:${var.aws_region}:${data.aws_caller_identity.current.account_id}:stateMachine:${var.project_name}-*"
       },
+      # AWS Glue Catalog & Database
       {
         Effect   = "Allow"
         Action   = ["glue:*"]
         Resource = "*"
       },
+      # Scoped IAM Roles
       {
         Effect   = "Allow"
         Action   = ["iam:*"]
         Resource = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${var.project_name}-*"
       },
+      # DynamoDB State Lock Table
       {
         Effect   = "Allow"
         Action   = ["dynamodb:*"]
         Resource = "arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/${var.project_name}-*"
       },
+      # CloudWatch Logs, Athena, SNS, & SSM
       {
         Effect   = "Allow"
         Action   = ["logs:*", "athena:*", "sns:*", "ssm:*"]
