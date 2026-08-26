@@ -370,8 +370,8 @@ resource "aws_sfn_state_machine" "ingestion_orchestrator" {
       ExtractOrdersWatermark = {
         Type = "Pass"
         Parameters = {
-          "orders_final_watermark.$" = "$.final_watermark"
-          "orders_partition_path.$"  = "$.partition_path"
+          "orders_final_watermark.$" = "$[1].final_watermark"
+          "orders_partition_path.$"  = "$[1].partition_path"
         }
         Next = "CheckIfWatermarkExists"
       }
