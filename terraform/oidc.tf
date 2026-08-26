@@ -72,7 +72,7 @@ resource "aws_iam_policy" "github_oidc_scoped_policy" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      # Project S3 Buckets & Remote State Backend (Both Prefixes)
+      # Project S3 Buckets & Remote State Backend
       {
         Effect = "Allow"
         Action = ["s3:*"]
@@ -83,11 +83,14 @@ resource "aws_iam_policy" "github_oidc_scoped_policy" {
           "arn:aws:s3:::erp-lakehouse-portfolio-*/*"
         ]
       },
-      # Project Lambda Functions
+      # Project Lambda Functions & Lambda Layers
       {
         Effect   = "Allow"
         Action   = ["lambda:*"]
-        Resource = "arn:aws:lambda:${var.aws_region}:${data.aws_caller_identity.current.account_id}:function:${var.project_name}-*"
+        Resource = [
+          "arn:aws:lambda:${var.aws_region}:${data.aws_caller_identity.current.account_id}:function:${var.project_name}-*",
+          "arn:aws:lambda:${var.aws_region}:${data.aws_caller_identity.current.account_id}:layer:${var.project_name}-*"
+        ]
       },
       # Project Step Functions State Machines
       {
@@ -101,16 +104,20 @@ resource "aws_iam_policy" "github_oidc_scoped_policy" {
         Action   = ["glue:*"]
         Resource = "*"
       },
-      # Scoped IAM Roles
+      # Scoped IAM Roles, Policies, & OIDC Provider
       {
         Effect   = "Allow"
         Action   = ["iam:*"]
-        Resource = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${var.project_name}-*"
+        Resource = [
+          "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${var.project_name}-*",
+          "arn:aws:iam::${data.aws_caller_identity.current.account_id}:policy/${var.project_name}-*",
+          "arn:aws:iam::${data.aws_caller_identity.current.account_id}:oidc-provider/*"
+        ]
       },
-      # DynamoDB State Lock Tables (Both Prefixes)
+      # DynamoDB State Lock Tables
       {
-        Effect = "Allow"
-        Action = ["dynamodb:*"]
+        Effect   = "Allow"
+        Action   = ["dynamodb:*"]
         Resource = [
           "arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/${var.project_name}-*",
           "arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/erp-lakehouse-portfolio-*"
