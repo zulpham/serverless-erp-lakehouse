@@ -4,18 +4,22 @@ variable "github_repository" {
   default     = "zulpham/serverless-erp-lakehouse"
 }
 
-# 1. AWS IAM OpenID Connect (OIDC) Identity Provider
+# 1. AWS IAM OpenID Connect (OIDC) Provider dengan Thumbprint Resmi Terlengkap
 resource "aws_iam_openid_connect_provider" "github_oidc" {
-  url             = "https://token.actions.githubusercontent.com"
-  client_id_list  = ["sts.amazonaws.com"]
-  thumbprint_list = ["6938fd4d98bab03faadb97b34396831e3780aea1", "1c58a3a8518e8759bf075b76b750d4f2df264fcd"]
+  url            = "https://token.actions.githubusercontent.com"
+  client_id_list = ["sts.amazonaws.com"]
+  thumbprint_list = [
+    "6938fd4d98bab03faadb97b34396831e3780aea1",
+    "1c58a3a8518e8759bf075b76b750d4f2df264fcd",
+    "15e78e0ab829e083fb8b9074092b7754308a3d46"
+  ]
 
   tags = {
     Component = "OIDC-Authentication"
   }
 }
 
-# 2. IAM Role for GitHub Actions (Strict Repo Binding)
+# 2. IAM Role dengan Trust Policy Terbuka untuk Seluruh Event di Repositori Anda
 resource "aws_iam_role" "github_actions_oidc_role" {
   name = "${var.project_name}-github-oidc-deploy-role"
 
@@ -45,7 +49,7 @@ resource "aws_iam_role" "github_actions_oidc_role" {
   }
 }
 
-# 3. Scoped Deployment Policy
+# 3. Izin Deployment
 resource "aws_iam_policy" "github_oidc_scoped_policy" {
   name        = "${var.project_name}-github-oidc-deploy-policy"
   description = "Scoped policy limiting CI/CD runner to project-specific infrastructure only"
