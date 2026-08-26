@@ -40,7 +40,7 @@ terraform {
 }
 
 # ------------------------------------------------------------------------------
-# 3. AWS Provider Configuration & Universal Tagging (FinOps Standard)
+# 3. AWS Provider Configuration & Universal Tagging
 # ------------------------------------------------------------------------------
 # Enforces mandatory Cost Allocation Tags on every provisioned resource across AWS.
 provider "aws" {
