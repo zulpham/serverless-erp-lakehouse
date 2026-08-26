@@ -19,7 +19,7 @@ resource "aws_iam_openid_connect_provider" "github_oidc" {
   }
 }
 
-# 2. IAM Role dengan Trust Policy Terbuka untuk Seluruh Event di Repositori Anda
+# Gantikan resource "aws_iam_role" "github_actions_oidc_role" di terraform/oidc.tf dengan ini:
 resource "aws_iam_role" "github_actions_oidc_role" {
   name = "${var.project_name}-github-oidc-deploy-role"
 
@@ -36,8 +36,12 @@ resource "aws_iam_role" "github_actions_oidc_role" {
           StringEquals = {
             "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
           }
+          # COCOKKAN SECARA EKSPLISIT FORMAT IMMUTABLE ID GITHUB ANDA
           StringLike = {
-            "token.actions.githubusercontent.com:sub" = "repo:${var.github_repository}:*"
+            "token.actions.githubusercontent.com:sub" = [
+              "repo:zulpham*/serverless-erp-lakehouse*:*",
+              "repo:zulpham@172234337/serverless-erp-lakehouse@1346920952:*"
+            ]
           }
         }
       }
