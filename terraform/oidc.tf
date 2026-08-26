@@ -67,18 +67,20 @@ resource "aws_iam_role" "github_actions_oidc_role" {
 # Explicitly limits the CI/CD runner to resources bearing the project prefix
 resource "aws_iam_policy" "github_oidc_scoped_policy" {
   name        = "${var.project_name}-github-oidc-deploy-policy"
-  description = "Scoped policy limiting CI/CD runner to project-specific infrastructure only"
+  description = "Scoped policy limiting CI/CD runner to project-specific infrastructure and bootstrap backend"
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      # Project S3 Buckets
+      # Project S3 Buckets & Remote State Backend (Both Prefixes)
       {
         Effect = "Allow"
         Action = ["s3:*"]
         Resource = [
           "arn:aws:s3:::${var.project_name}-*",
-          "arn:aws:s3:::${var.project_name}-*/*"
+          "arn:aws:s3:::${var.project_name}-*/*",
+          "arn:aws:s3:::erp-lakehouse-portfolio-*",
+          "arn:aws:s3:::erp-lakehouse-portfolio-*/*"
         ]
       },
       # Project Lambda Functions
@@ -105,11 +107,14 @@ resource "aws_iam_policy" "github_oidc_scoped_policy" {
         Action   = ["iam:*"]
         Resource = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${var.project_name}-*"
       },
-      # DynamoDB State Lock Table
+      # DynamoDB State Lock Tables (Both Prefixes)
       {
-        Effect   = "Allow"
-        Action   = ["dynamodb:*"]
-        Resource = "arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/${var.project_name}-*"
+        Effect = "Allow"
+        Action = ["dynamodb:*"]
+        Resource = [
+          "arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/${var.project_name}-*",
+          "arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/erp-lakehouse-portfolio-*"
+        ]
       },
       # CloudWatch Logs, Athena, SNS, & SSM
       {
