@@ -1,17 +1,7 @@
 # ==============================================================================
 # ORCHESTRATION LAYER - AWS STEP FUNCTIONS STATE MACHINE & DLQ
 # ==============================================================================
-# Architecture: Resilient Distributed State Machine with SNS Dead-Letter Alerting
-# Standards: Injected Initial State, Bounded Concurrency, & Fail-Safe Catching
-# Purpose: Orchestrates multi-entity Lambda extractions concurrently, manages
-#          stateful pagination resume loops, and atomically commits SSM watermarks.
-# ==============================================================================
 
-# ------------------------------------------------------------------------------
-# 1. Amazon SNS Topic for SRE Dead-Letter Alerts (DLQ)
-# ------------------------------------------------------------------------------
-# Dedicated notification channel receiving fatal failure payloads when a task
-# exhausts all retry attempts.
 resource "aws_sns_topic" "pipeline_alerts" {
   name = "${var.project_name}-pipeline-alerts"
 
@@ -20,17 +10,11 @@ resource "aws_sns_topic" "pipeline_alerts" {
   }
 }
 
-# ------------------------------------------------------------------------------
-# 2. CloudWatch Log Group for State Machine Execution Tracing
-# ------------------------------------------------------------------------------
 resource "aws_cloudwatch_log_group" "step_functions_logs" {
-  name              = "/aws/vendedlogs/states/${var.project_name}-ingestion-orchestrator"
+  name              = "/aws/vendedlogs/states/${var.project_name}-lakehouse-orchestrator"
   retention_in_days = 14
 }
 
-# ------------------------------------------------------------------------------
-# 3. IAM Execution Role & Granular Policy for Step Functions
-# ------------------------------------------------------------------------------
 resource "aws_iam_role" "step_functions_role" {
   name = "${var.project_name}-step-functions-role"
 
@@ -50,12 +34,11 @@ resource "aws_iam_role" "step_functions_role" {
 
 resource "aws_iam_policy" "step_functions_policy" {
   name        = "${var.project_name}-step-functions-policy"
-  description = "Granular policy allowing Step Functions to invoke Lambda, commit SSM watermarks, and publish SNS alerts"
+  description = "Granular policy allowing Step Functions to invoke Lambda, commit SSM, execute Athena Sync, and publish SNS alerts"
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      # Invoke Ingestion Lambda
       {
         Effect = "Allow"
         Action = [
@@ -63,10 +46,11 @@ resource "aws_iam_policy" "step_functions_policy" {
         ]
         Resource = [
           aws_lambda_function.ingestion_lambda.arn,
-          "${aws_lambda_function.ingestion_lambda.arn}:*"
+          "${aws_lambda_function.ingestion_lambda.arn}:*",
+          aws_lambda_function.sql_dispatcher.arn,
+          "${aws_lambda_function.sql_dispatcher.arn}:*"
         ]
       },
-      # Native AWS SDK SSM Parameter Store Integration
       {
         Effect = "Allow"
         Action = [
@@ -75,7 +59,55 @@ resource "aws_iam_policy" "step_functions_policy" {
         ]
         Resource = "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/${var.project_name}/*"
       },
-      # Amazon SNS Notification Publishing
+      {
+        Effect = "Allow"
+        Action = [
+          "athena:StartQueryExecution",
+          "athena:GetQueryExecution",
+          "athena:StopQueryExecution",
+          "athena:GetWorkGroup"
+        ]
+        Resource = [
+          aws_athena_workgroup.lakehouse_workgroup.arn,
+          "arn:aws:athena:${var.aws_region}:${data.aws_caller_identity.current.account_id}:workgroup/${var.project_name}-workgroup"
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "glue:GetDatabase",
+          "glue:GetTable",
+          "glue:GetTables",
+          "glue:GetPartitions",
+          "glue:CreateTable",
+          "glue:UpdateTable",
+          "glue:BatchCreatePartition"
+        ]
+        Resource = "*"
+      },
+      # S3 ACCESS: Includes s3:DeleteObject for Apache Iceberg ACID Vacuuming & Snapshot Mutation
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetBucketLocation",
+          "s3:GetObject",
+          "s3:ListBucket",
+          "s3:ListBucketMultipartUploads",
+          "s3:ListMultipartUploadParts",
+          "s3:AbortMultipartUpload",
+          "s3:CreateBucket",
+          "s3:PutObject",
+          "s3:DeleteObject" # <-- MANDATORY FOR ICEBERG ACID MERGE COMPACTION
+        ]
+        Resource = [
+          aws_s3_bucket.raw_zone.arn,
+          "${aws_s3_bucket.raw_zone.arn}/*",
+          aws_s3_bucket.iceberg_warehouse.arn,
+          "${aws_s3_bucket.iceberg_warehouse.arn}/*",
+          aws_s3_bucket.athena_results.arn,
+          "${aws_s3_bucket.athena_results.arn}/*"
+        ]
+      },
       {
         Effect = "Allow"
         Action = [
@@ -83,7 +115,6 @@ resource "aws_iam_policy" "step_functions_policy" {
         ]
         Resource = aws_sns_topic.pipeline_alerts.arn
       },
-      # CloudWatch Logging Permissions
       {
         Effect = "Allow"
         Action = [
@@ -107,11 +138,8 @@ resource "aws_iam_role_policy_attachment" "step_functions_attach" {
   policy_arn = aws_iam_policy.step_functions_policy.arn
 }
 
-# ------------------------------------------------------------------------------
-# 4. State Machine Definition (Amazon States Language - ASL)
-# ------------------------------------------------------------------------------
 resource "aws_sfn_state_machine" "ingestion_orchestrator" {
-  name     = "${var.project_name}-ingestion-orchestrator"
+  name     = "${var.project_name}-lakehouse-orchestrator"
   role_arn = aws_iam_role.step_functions_role.arn
 
   logging_configuration {
@@ -121,11 +149,35 @@ resource "aws_sfn_state_machine" "ingestion_orchestrator" {
   }
 
   definition = jsonencode({
-    Comment = "Serverless ERP Lakehouse - Enterprise Ingestion & DLQ Orchestrator"
-    StartAt = "InjectDefaultState"
+    Comment = "Serverless ERP Lakehouse - End-to-End Ingestion & Athena Iceberg Orchestrator"
+    StartAt = "BootstrapIcebergSchema"
     States = {
       # ------------------------------------------------------------------------
-      # STEP 0: INJECT DEFAULT STATE (Anti First-Run JSONPath Missing Crash)
+      # STEP 0: BOOTSTRAP ICEBERG & STAGING SCHEMA (Solves Chicken-and-Egg DDL)
+      # ------------------------------------------------------------------------
+      BootstrapIcebergSchema = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::lambda:invoke"
+        Parameters = {
+          FunctionName = aws_lambda_function.sql_dispatcher.function_name
+          Payload = {
+            "action" = "bootstrap_ddl"
+          }
+        }
+        ResultPath = "$.bootstrap_result"
+        Retry = [
+          {
+            ErrorEquals     = ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"]
+            IntervalSeconds = 2
+            MaxAttempts     = 3
+            BackoffRate     = 2.0
+          }
+        ]
+        Next = "InjectDefaultState"
+      }
+
+      # ------------------------------------------------------------------------
+      # STEP 1: INJECT DEFAULT STATE
       # ------------------------------------------------------------------------
       InjectDefaultState = {
         Type = "Pass"
@@ -147,15 +199,12 @@ resource "aws_sfn_state_machine" "ingestion_orchestrator" {
       }
 
       # ------------------------------------------------------------------------
-      # STEP 1: PARALLEL INGESTION (Dimensions Map + Orders Looping Flow)
+      # STEP 2: PARALLEL BRONZE INGESTION
       # ------------------------------------------------------------------------
       ParallelIngestion = {
         Type = "Parallel"
         Next = "ExtractOrdersWatermark"
         Branches = [
-          # --------------------------------------------------------------------
-          # BRANCH 0: DIMENSION ENTITIES MAP STATE (Bounded Concurrency: 4)
-          # --------------------------------------------------------------------
           {
             StartAt = "IngestDimensionsMap"
             States = {
@@ -216,9 +265,6 @@ resource "aws_sfn_state_machine" "ingestion_orchestrator" {
             }
           },
 
-          # --------------------------------------------------------------------
-          # BRANCH 1: ORDERS FACT INGESTION FLOW WITH STATEFUL CHOICE LOOP
-          # --------------------------------------------------------------------
           {
             StartAt = "InvokeOrdersLambda"
             States = {
@@ -319,7 +365,7 @@ resource "aws_sfn_state_machine" "ingestion_orchestrator" {
       }
 
       # ------------------------------------------------------------------------
-      # STEP 2: EXTRACT ORDERS WATERMARK FROM ARRAY INDEX 1 ($)
+      # STEP 3: EXTRACT ORDERS WATERMARK & PARTITION FROM ARRAY INDEX 1 ($)
       # ------------------------------------------------------------------------
       ExtractOrdersWatermark = {
         Type = "Pass"
@@ -339,11 +385,11 @@ resource "aws_sfn_state_machine" "ingestion_orchestrator" {
             Next      = "CommitOrdersSSMWatermark"
           }
         ]
-        Default = "IngestionWorkflowSuccess"
+        Default = "PrepareSilverPayload"
       }
 
       # ------------------------------------------------------------------------
-      # STEP 3: ATOMIC COMMIT SSM WATERMARK (Native AWS SDK Integration)
+      # STEP 4: ATOMIC COMMIT SSM WATERMARK
       # ------------------------------------------------------------------------
       CommitOrdersSSMWatermark = {
         Type     = "Task"
@@ -355,14 +401,108 @@ resource "aws_sfn_state_machine" "ingestion_orchestrator" {
           Overwrite   = true
           Description = "Atomic Event-Time Watermark committed by Step Functions Ingestion Orchestrator"
         }
-        Next = "IngestionWorkflowSuccess"
+        Next = "PrepareSilverPayload"
       }
 
       # ------------------------------------------------------------------------
-      # STEP 4: WORKFLOW COMPLETION
+      # STEP 5: PREPARE DETERMINISTIC SILVER PAYLOAD
       # ------------------------------------------------------------------------
-      IngestionWorkflowSuccess = {
-        Type = "Succeed"
+      PrepareSilverPayload = {
+        Type = "Pass"
+        Parameters = {
+          "silver_context" = {
+            "partition_path.$" = "$.orders_partition_path"
+            "entities" = [
+              "dim_customers",
+              "dim_products",
+              "dim_employees",
+              "dim_suppliers",
+              "fact_order_details"
+            ]
+          }
+        }
+        Next = "SilverTransformationMap"
+      }
+
+      # ------------------------------------------------------------------------
+      # STEP 6: SILVER TRANSFORMATION MAP (Zero-Idle Synchronous Athena Execution)
+      # ------------------------------------------------------------------------
+      SilverTransformationMap = {
+        Type           = "Map"
+        MaxConcurrency = 3
+        ItemsPath      = "$.silver_context.entities"
+        ItemSelector = {
+          "entity_name.$"    = "$$.Map.Item.Value"
+          "partition_path.$" = "$.silver_context.partition_path"
+        }
+        End = true
+        ItemProcessor = {
+          ProcessorConfig = { Mode = "INLINE" }
+          StartAt         = "RenderSQLEntity"
+          States = {
+            # 1. Micro-Dispatcher: Render .sql Template (< 5ms)
+            RenderSQLEntity = {
+              Type     = "Task"
+              Resource = "arn:aws:states:::lambda:invoke"
+              Parameters = {
+                FunctionName = aws_lambda_function.sql_dispatcher.function_name
+                Payload = {
+                  "action"           = "render_sql"
+                  "entity_name.$"    = "$.entity_name"
+                  "partition_path.$" = "$.partition_path"
+                }
+              }
+              ResultPath = "$.sql_render_result"
+              Next       = "ExecuteAthenaMerge"
+            }
+
+            # 2. Athena Synchronous MERGE Execution (Zero-Idle Cost)
+            ExecuteAthenaMerge = {
+              Type     = "Task"
+              Resource = "arn:aws:states:::athena:startQueryExecution.sync"
+              Parameters = {
+                "QueryString.$" = "$.sql_render_result.Payload.query_string"
+                WorkGroup       = aws_athena_workgroup.lakehouse_workgroup.name
+                ResultConfiguration = {
+                  OutputLocation = "s3://${aws_s3_bucket.athena_results.id}/"
+                }
+              }
+              Retry = [
+                {
+                  ErrorEquals     = ["Athena.TooManyRequestsException", "Athena.ResourceLimitExceededException"]
+                  IntervalSeconds = 5
+                  MaxAttempts     = 3
+                  BackoffRate     = 2.0
+                }
+              ]
+              Catch = [
+                {
+                  ErrorEquals = ["States.ALL"]
+                  ResultPath  = "$.error_info"
+                  Next        = "NotifyAthenaFailureSNS"
+                }
+              ]
+              End = true
+            }
+
+            # 3. SRE Dead-Letter Alert on Fatal Failure
+            NotifyAthenaFailureSNS = {
+              Type     = "Task"
+              Resource = "arn:aws:states:::sns:publish"
+              Parameters = {
+                TopicArn    = aws_sns_topic.pipeline_alerts.arn
+                Subject     = "ALARM: Athena Silver Transformation Failed"
+                "Message.$" = "States.JsonToString($)"
+              }
+              Next = "AthenaTaskFailed"
+            }
+
+            AthenaTaskFailed = {
+              Type  = "Fail"
+              Cause = "Athena MERGE INTO Query Execution Failed"
+            }
+          }
+        }
       }
     }
   })

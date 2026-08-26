@@ -1,13 +1,9 @@
 # ==============================================================================
-# INGESTION COMPUTE LAYER - AWS LAMBDA MODULE (SELF-CONTAINED)
-# ==============================================================================
-# Architecture: Pure Functional Serverless Micro-Task Worker
-# Purpose: Packages Python source code and Linux binary wheels into an S3-backed
-#          layer, provisions execution IAM roles, and defines the compute worker.
+# COMPUTE LAYER - AWS LAMBDA MODULE (INGESTION WORKER & SQL DISPATCHER)
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
-# 1. IAM Execution Role & Least-Privilege Policy
+# 1. IAM Role & Policy for Ingestion Worker (S3 Raw & SSM Only)
 # ------------------------------------------------------------------------------
 resource "aws_iam_role" "lambda_ingestion_role" {
   name = "${var.project_name}-lambda-ingestion-role"
@@ -30,21 +26,18 @@ resource "aws_iam_role" "lambda_ingestion_role" {
   }
 }
 
-# Dedicated CloudWatch Log Group with 14-day retention for SRE log inspection
 resource "aws_cloudwatch_log_group" "lambda_ingestion_logs" {
   name              = "/aws/lambda/${var.project_name}-ingestion"
   retention_in_days = 14
 }
 
-# Scoped IAM Policy: Restricts Lambda to CloudWatch, S3 Raw Zone, and SSM Parameters
 resource "aws_iam_policy" "lambda_ingestion_policy" {
   name        = "${var.project_name}-lambda-ingestion-policy"
-  description = "Granular policy allowing Lambda to write S3 Raw Parquet, log to CloudWatch, and read SSM watermarks"
+  description = "Granular policy allowing Ingestion Lambda to write S3 Raw Parquet and read SSM watermarks"
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      # CloudWatch Log Streaming
       {
         Effect = "Allow"
         Action = [
@@ -53,7 +46,6 @@ resource "aws_iam_policy" "lambda_ingestion_policy" {
         ]
         Resource = "${aws_cloudwatch_log_group.lambda_ingestion_logs.arn}:*"
       },
-      # S3 Raw Zone Write Access
       {
         Effect = "Allow"
         Action = [
@@ -62,7 +54,6 @@ resource "aws_iam_policy" "lambda_ingestion_policy" {
         ]
         Resource = "${aws_s3_bucket.raw_zone.arn}/*"
       },
-      # AWS SSM Parameter Store Read Access (Fail-Fast Watermark Retrieval)
       {
         Effect = "Allow"
         Action = [
@@ -81,23 +72,82 @@ resource "aws_iam_role_policy_attachment" "lambda_ingestion_attach" {
 }
 
 # ------------------------------------------------------------------------------
-# 2. Source Packaging & S3-Backed Layer Staging
+# 2. DEDICATED IAM Role & Policy for SQL Dispatcher (Athena & Glue Scoped)
 # ------------------------------------------------------------------------------
-# Compresses the Python handler code into a deployable zip artifact
-data "archive_file" "lambda_code_zip" {
-  type        = "zip"
-  source_file = "${path.module}/../src/ingestion/lambda_function.py"
-  output_path = "${path.module}/lambda_function_payload.zip"
+resource "aws_iam_role" "lambda_dispatcher_role" {
+  name = "${var.project_name}-lambda-dispatcher-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
+      }
+    ]
+  })
+
+  tags = {
+    Component = "Dispatcher-IAM"
+  }
 }
 
-# Compresses external dependency wheels (Polars, Requests, Urllib3)
+resource "aws_cloudwatch_log_group" "sql_dispatcher_logs" {
+  name              = "/aws/lambda/${var.project_name}-sql-dispatcher"
+  retention_in_days = 14
+}
+
+resource "aws_iam_policy" "lambda_dispatcher_policy" {
+  name        = "${var.project_name}-lambda-dispatcher-policy"
+  description = "Granular policy allowing SQL Dispatcher to log and read catalog metadata"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ]
+        Resource = "${aws_cloudwatch_log_group.sql_dispatcher_logs.arn}:*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "glue:GetDatabase",
+          "glue:GetTable",
+          "glue:GetTables"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "lambda_dispatcher_attach" {
+  role       = aws_iam_role.lambda_dispatcher_role.name
+  policy_arn = aws_iam_policy.lambda_dispatcher_policy.arn
+}
+
+# ------------------------------------------------------------------------------
+# 3. Packaging & Layer Versioning
+# ------------------------------------------------------------------------------
+data "archive_file" "lambda_code_zip" {
+  type        = "zip"
+  source_dir  = "${path.module}/../src"
+  output_path = "${path.module}/lambda_code_payload.zip"
+}
+
 data "archive_file" "lambda_layer_zip" {
   type        = "zip"
   source_dir  = "${path.module}/../layers/polars_layer"
   output_path = "${path.module}/polars_layer_payload.zip"
 }
 
-# Uploads layer archive to S3 to bypass the Lambda 50 MB Direct Upload API limit
 resource "aws_s3_object" "polars_layer_zip_s3" {
   bucket      = aws_s3_bucket.raw_zone.id
   key         = "_build_artifacts/polars_layer_payload.zip"
@@ -110,28 +160,26 @@ resource "aws_s3_object" "polars_layer_zip_s3" {
   }
 }
 
-# Registers the immutable Lambda Layer Version pointing to S3
 resource "aws_lambda_layer_version" "polars_layer" {
   layer_name          = "${var.project_name}-polars-layer"
   s3_bucket           = aws_s3_bucket.raw_zone.id
   s3_key              = aws_s3_object.polars_layer_zip_s3.key
   compatible_runtimes = ["python3.11", "python3.12"]
   source_code_hash    = data.archive_file.lambda_layer_zip.output_base64sha256
-  description         = "Immutable runtime layer containing Polars, Requests, and Urllib3 (manylinux2014_x86_64)"
+  description         = "Immutable runtime layer containing Polars, Requests, and Urllib3"
 }
 
 # ------------------------------------------------------------------------------
-# 3. Core AWS Lambda Ingestion Function
+# 4. Ingestion Worker Function
 # ------------------------------------------------------------------------------
 resource "aws_lambda_function" "ingestion_lambda" {
   filename         = data.archive_file.lambda_code_zip.output_path
   function_name    = "${var.project_name}-ingestion"
   role             = aws_iam_role.lambda_ingestion_role.arn
-  handler          = "lambda_function.lambda_handler"
+  handler          = "ingestion/lambda_function.lambda_handler"
   runtime          = "python3.11"
   source_code_hash = data.archive_file.lambda_code_zip.output_base64sha256
 
-  # FinOps Guardrails: 5-minute timeout and 512 MB RAM for optimal Polars Arrow execution
   timeout     = 300
   memory_size = 512
 
@@ -155,4 +203,58 @@ resource "aws_lambda_function" "ingestion_lambda" {
     Component = "Ingestion-Worker"
     Layer     = "Bronze"
   }
+}
+
+# ------------------------------------------------------------------------------
+# DEDICATED IAM Role & Policy for SQL Dispatcher (Pure In-Memory Renderer)
+# ------------------------------------------------------------------------------
+resource "aws_iam_role" "lambda_dispatcher_role" {
+  name = "${var.project_name}-lambda-dispatcher-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
+      }
+    ]
+  })
+
+  tags = {
+    Component = "Dispatcher-IAM"
+  }
+}
+
+resource "aws_cloudwatch_log_group" "sql_dispatcher_logs" {
+  name              = "/aws/lambda/${var.project_name}-sql-dispatcher"
+  retention_in_days = 14
+}
+
+# 100% PURE LEAST-PRIVILEGE: Zero AWS API permissions except CloudWatch Logging
+resource "aws_iam_policy" "lambda_dispatcher_policy" {
+  name        = "${var.project_name}-lambda-dispatcher-policy"
+  description = "Minimalist policy granting SQL Dispatcher only CloudWatch logging rights"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ]
+        Resource = "${aws_cloudwatch_log_group.sql_dispatcher_logs.arn}:*"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "lambda_dispatcher_attach" {
+  role       = aws_iam_role.lambda_dispatcher_role.name
+  policy_arn = aws_iam_policy.lambda_dispatcher_policy.arn
 }
