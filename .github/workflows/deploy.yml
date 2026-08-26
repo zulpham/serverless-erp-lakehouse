@@ -70,6 +70,15 @@ jobs:
           terraform_version: "1.9.0"
 
       # ------------------------------------------------------------------------
+      # FORENSIC DEBUGGER: Inspect Decoded GitHub OIDC Claims
+      # ------------------------------------------------------------------------
+      - name: "Debug OIDC Token Claims (JWT Inspection)"
+        run: |
+          TOKEN=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r '.value')
+          echo "=== DECODED OIDC JWT CLAIMS ==="
+          echo "$TOKEN" | cut -d '.' -f 2 | base64 -d 2>/dev/null | jq .  
+
+      # ------------------------------------------------------------------------
       # PURE ZERO-TRUST OIDC AUTHENTICATION (NO STATIC ACCESS KEYS)
       # ------------------------------------------------------------------------
       - name: "Configure AWS Credentials via Pure OIDC (Zero-Trust)"
