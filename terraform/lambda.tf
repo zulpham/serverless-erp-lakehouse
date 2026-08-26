@@ -3,7 +3,7 @@
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
-# 1. IAM Role & Policy for Ingestion Worker (S3 Raw & SSM Only)
+# 1. Ingestion Worker IAM Role & CloudWatch Logs
 # ------------------------------------------------------------------------------
 resource "aws_iam_role" "lambda_ingestion_role" {
   name = "${var.project_name}-lambda-ingestion-role"
@@ -72,7 +72,7 @@ resource "aws_iam_role_policy_attachment" "lambda_ingestion_attach" {
 }
 
 # ------------------------------------------------------------------------------
-# 2. DEDICATED IAM Role & Policy for SQL Dispatcher (Athena & Glue Scoped)
+# 2. SQL Dispatcher IAM Role & CloudWatch Logs (Pure Least Privilege)
 # ------------------------------------------------------------------------------
 resource "aws_iam_role" "lambda_dispatcher_role" {
   name = "${var.project_name}-lambda-dispatcher-role"
@@ -102,7 +102,7 @@ resource "aws_cloudwatch_log_group" "sql_dispatcher_logs" {
 
 resource "aws_iam_policy" "lambda_dispatcher_policy" {
   name        = "${var.project_name}-lambda-dispatcher-policy"
-  description = "Granular policy allowing SQL Dispatcher to log and read catalog metadata"
+  description = "Minimalist policy granting SQL Dispatcher only CloudWatch logging rights"
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -114,15 +114,6 @@ resource "aws_iam_policy" "lambda_dispatcher_policy" {
           "logs:PutLogEvents"
         ]
         Resource = "${aws_cloudwatch_log_group.sql_dispatcher_logs.arn}:*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "glue:GetDatabase",
-          "glue:GetTable",
-          "glue:GetTables"
-        ]
-        Resource = "*"
       }
     ]
   })
@@ -134,7 +125,7 @@ resource "aws_iam_role_policy_attachment" "lambda_dispatcher_attach" {
 }
 
 # ------------------------------------------------------------------------------
-# 3. Packaging & Layer Versioning
+# 3. Unified Packaging & S3-Backed Layer Staging
 # ------------------------------------------------------------------------------
 data "archive_file" "lambda_code_zip" {
   type        = "zip"
@@ -170,7 +161,7 @@ resource "aws_lambda_layer_version" "polars_layer" {
 }
 
 # ------------------------------------------------------------------------------
-# 4. Ingestion Worker Function
+# 4. Ingestion Worker Lambda Function
 # ------------------------------------------------------------------------------
 resource "aws_lambda_function" "ingestion_lambda" {
   filename         = data.archive_file.lambda_code_zip.output_path
@@ -206,55 +197,31 @@ resource "aws_lambda_function" "ingestion_lambda" {
 }
 
 # ------------------------------------------------------------------------------
-# DEDICATED IAM Role & Policy for SQL Dispatcher (Pure In-Memory Renderer)
+# 5. SQL Micro-Dispatcher Lambda Function (< 2ms Runtime)
 # ------------------------------------------------------------------------------
-resource "aws_iam_role" "lambda_dispatcher_role" {
-  name = "${var.project_name}-lambda-dispatcher-role"
+resource "aws_lambda_function" "sql_dispatcher" {
+  filename         = data.archive_file.lambda_code_zip.output_path
+  function_name    = "${var.project_name}-sql-dispatcher"
+  role             = aws_iam_role.lambda_dispatcher_role.arn
+  handler          = "transformation/sql_dispatcher.lambda_handler"
+  runtime          = "python3.11"
+  source_code_hash = data.archive_file.lambda_code_zip.output_base64sha256
 
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Action = "sts:AssumeRole"
-        Effect = "Allow"
-        Principal = {
-          Service = "lambda.amazonaws.com"
-        }
-      }
-    ]
-  })
+  timeout     = 10
+  memory_size = 128
+
+  environment {
+    variables = {
+      DATABASE_NAME = aws_glue_catalog_database.lakehouse_db.name
+    }
+  }
+
+  depends_on = [
+    aws_cloudwatch_log_group.sql_dispatcher_logs
+  ]
 
   tags = {
-    Component = "Dispatcher-IAM"
+    Component = "SQL-Micro-Dispatcher"
+    Layer     = "Silver"
   }
-}
-
-resource "aws_cloudwatch_log_group" "sql_dispatcher_logs" {
-  name              = "/aws/lambda/${var.project_name}-sql-dispatcher"
-  retention_in_days = 14
-}
-
-# 100% PURE LEAST-PRIVILEGE: Zero AWS API permissions except CloudWatch Logging
-resource "aws_iam_policy" "lambda_dispatcher_policy" {
-  name        = "${var.project_name}-lambda-dispatcher-policy"
-  description = "Minimalist policy granting SQL Dispatcher only CloudWatch logging rights"
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "logs:CreateLogStream",
-          "logs:PutLogEvents"
-        ]
-        Resource = "${aws_cloudwatch_log_group.sql_dispatcher_logs.arn}:*"
-      }
-    ]
-  })
-}
-
-resource "aws_iam_role_policy_attachment" "lambda_dispatcher_attach" {
-  role       = aws_iam_role.lambda_dispatcher_role.name
-  policy_arn = aws_iam_policy.lambda_dispatcher_policy.arn
 }
