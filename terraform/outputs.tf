@@ -56,3 +56,8 @@ output "sns_alerts_topic_arn" {
   description = "The Amazon Resource Name (ARN) of the Amazon SNS Topic receiving dead-letter failure alerts for SRE triage"
   value       = aws_sns_topic.pipeline_alerts.arn
 }
+
+output "github_actions_oidc_role_arn" {
+  description = "ARN dari Zero-Trust OIDC Role untuk GitHub Actions"
+  value       = aws_iam_role.github_actions_oidc_role.arn
+}

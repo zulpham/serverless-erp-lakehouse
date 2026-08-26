@@ -1,0 +1,133 @@
+name: "Data Lakehouse CI/CD GitOps Pipeline"
+
+on:
+  push:
+    branches:
+      - master
+      - main
+  pull_request:
+    branches:
+      - master
+      - main
+
+# Mandatory OIDC token generation permissions
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  # ============================================================================
+  # JOB 1: CODE QUALITY & PYTHON VALIDATION GATE
+  # ============================================================================
+  code-quality:
+    name: "1. Python Code Quality & AST Validation"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: "Checkout Repository Code"
+        uses: actions/checkout@v4
+
+      - name: "Set up Python 3.11"
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: "Install Quality Gate Dependencies"
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8 polars requests urllib3 boto3
+
+      - name: "Validate Python AST Compilation"
+        run: |
+          python -m py_compile src/ingestion/lambda_function.py
+          python -m py_compile src/transformation/glue_transform.py
+          echo "Python AST Compilation: 100% VALID"
+
+      - name: "Lint Python Source with Flake8"
+        run: |
+          flake8 src/ --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 src/ --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+  # ============================================================================
+  # JOB 2: TERRAFORM GITOPS DEPLOYMENT (PURE ZERO-TRUST OIDC)
+  # ============================================================================
+  terraform:
+    name: "2. Terraform Infrastructure GitOps"
+    runs-on: ubuntu-latest
+    needs: code-quality
+    defaults:
+      run:
+        working-directory: ./terraform
+
+    steps:
+      - name: "Checkout Repository Code"
+        uses: actions/checkout@v4
+
+      - name: "Set up Terraform CLI"
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.0"
+
+      # ------------------------------------------------------------------------
+      # PURE ZERO-TRUST OIDC AUTHENTICATION (NO STATIC ACCESS KEYS)
+      # ------------------------------------------------------------------------
+      - name: "Configure AWS Credentials via Pure OIDC (Zero-Trust)"
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: "Prepare Lambda Layer Linux Binary Wheels"
+        run: |
+          mkdir -p ../layers/polars_layer/python
+          pip install -r ../src/ingestion/requirements.txt --platform manylinux2014_x86_64 --target ../layers/polars_layer/python --only-binary=:all: --upgrade
+
+      - name: "Terraform Format Check"
+        run: terraform fmt -check
+
+      - name: "Terraform Init (Remote S3 & DynamoDB Locking)"
+        run: terraform init
+
+      - name: "Terraform Validate"
+        run: terraform validate
+
+      - name: "Terraform Plan"
+        id: plan
+        run: |
+          terraform plan -no-color -out=tfplan
+          terraform show -no-color tfplan > plan_output.txt
+
+      # ------------------------------------------------------------------------
+      # GitOps Transparency: Post Plan Diff as PR Comment
+      # ------------------------------------------------------------------------
+      - name: "Post Terraform Plan to Pull Request"
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('./terraform/plan_output.txt', 'utf8');
+            const maxLen = 60000;
+            const truncatedPlan = plan.length > maxLen ? plan.substring(0, maxLen) + '\n... (plan output truncated)' : plan;
+            
+            const output = `#### Terraform Plan Output 📖
+            \`\`\`hcl
+            ${truncatedPlan}
+            \`\`\`
+            *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+      # ------------------------------------------------------------------------
+      # Automated Deployment with Strict Operator Precedence
+      # ------------------------------------------------------------------------
+      - name: "Terraform Apply (Automatic Deployment on Push)"
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
+        run: terraform apply -auto-approve tfplan
