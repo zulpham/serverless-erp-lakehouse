@@ -401,7 +401,8 @@ resource "aws_sfn_state_machine" "ingestion_orchestrator" {
           Overwrite   = true
           Description = "Atomic Event-Time Watermark committed by Step Functions Ingestion Orchestrator"
         }
-        Next = "PrepareSilverPayload"
+        ResultPath = "$.ssm_result"
+        Next       = "PrepareSilverPayload"
       }
 
       # ------------------------------------------------------------------------
