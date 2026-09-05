@@ -47,7 +47,6 @@ resource "aws_iam_role" "github_actions_oidc_role" {
           StringLike = {
             "token.actions.githubusercontent.com:sub" = [
               "repo:${var.github_repository}:*",
-              "repo:zulpham*/serverless-erp-lakehouse*:*",
               "repo:zulpham@172234337/serverless-erp-lakehouse@1346920952:*"
             ]
           }
